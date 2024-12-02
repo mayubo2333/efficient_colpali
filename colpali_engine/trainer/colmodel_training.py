@@ -33,10 +33,14 @@ class ColModelTrainingConfig:
     max_length: int = 256
     run_eval: bool = True
     run_train: bool = True
+    proj_lora: bool = True
     peft_config: Optional[LoraConfig] = None
     processor: BaseVisualRetrieverProcessor = None
     tokenizer: PreTrainedTokenizer = None
     loss_func: Optional[Callable] = ColbertLoss()
+    pooling_strategy: Optional[str] = None
+    pool_size: int = 10
+    max_image_tokens: Optional[int] = None
     dataset_loading_func: Optional[Callable] = None
     eval_dataset_loader: Optional[Dict[str, Callable]] = None
     pretrained_peft_model_name_or_path: Optional[str] = None
@@ -59,10 +63,15 @@ class ColModelTrainingConfig:
             self.tr_args.learning_rate = float(self.tr_args.learning_rate)
         self.tr_args.remove_unused_columns = False
 
+        if self.processor is not None and self.max_image_tokens is not None:
+            self.processor.max_pixels = self.max_image_tokens * 28 * 28
+
         if self.processor is None and self.tokenizer is None:
             print("Using textual model tokenization")
             self.tokenizer = AutoTokenizer.from_pretrained(self.model.name_or_path)
 
+        self.model.pooling_strategy = self.pooling_strategy
+        self.model.pool_size = self.pool_size
         if self.pretrained_peft_model_name_or_path is not None:
             self.model.load_adapter(self.pretrained_peft_model_name_or_path)
 
