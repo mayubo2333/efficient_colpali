@@ -82,3 +82,35 @@ def normalize_similarity_map(similarity_map: torch.Tensor) -> torch.Tensor:
     )  # (n_patch_x, n_patch_y) or (batch_size, n_patch_x, n_patch_y)
 
     return similarity_map_normalized
+
+
+def get_attn_maps(
+    attn_weights: torch.Tensor,
+    n_patches: Union[Tuple[int, int], List[Tuple[int, int]]],
+    image_mask: torch.Tensor,
+) -> List[torch.Tensor]:
+
+    if isinstance(n_patches, tuple):
+        n_patches = [n_patches] * attn_weights.size(0)
+
+    attn_maps: List[torch.Tensor] = []
+
+    for idx in range(attn_weights.size(0)):
+        # Sanity check
+        if image_mask[idx].sum() != n_patches[idx][0] * n_patches[idx][1]:
+            raise ValueError(
+                f"The number of patches ({n_patches[idx][0]} x {n_patches[idx][1]} = "
+                f"{n_patches[idx][0] * n_patches[idx][1]}) "
+                f"does not match the number of non-padded image tokens ({image_mask[idx].sum()})."
+            )
+
+        # Rearrange the output image tensor to explicitly represent the 2D grid of patches
+        attn_map = rearrange(
+            attn_weights[idx][image_mask[idx]],  # (n_patches_x * n_patches_y, )
+            "(h w) -> 1 w h",
+            w=n_patches[idx][0],
+            h=n_patches[idx][1],
+        )  # (n_patches_x, n_patches_y)
+        attn_maps.append(attn_map)
+    
+    return attn_maps

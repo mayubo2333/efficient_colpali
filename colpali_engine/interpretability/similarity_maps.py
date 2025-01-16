@@ -148,3 +148,80 @@ def plot_all_similarity_maps(
         plots.append((fig, ax))
 
     return plots
+
+
+def plot_one_similarity_map(
+    image: Image.Image,
+    similarity_maps: torch.Tensor,
+    figsize: Tuple[int, int] = (8, 8),
+    show_colorbar: bool = False,
+    add_title: bool = True,
+    title: str = None,
+) -> List[Tuple[plt.Figure, plt.Axes]]:
+    """
+    For each token in the query, plot and overlay a similarity map over the input image.
+
+    A similarity map is a 2D tensor where each element (i, j) represents the similarity score between a chosen query
+    token and the associated image patch at position (i, j). Thus, the higher the similarity score, the brighter the
+    color of the patch.
+
+    Args:
+        image: PIL image
+        query_tokens: list of query tokens
+        similarity_maps: tensor of shape (query_tokens, n_patches_x, n_patches_y)
+        figsize: size of the figure
+        show_colorbar: whether to show a colorbar
+        add_title: whether to add a title with the token and the max similarity score
+
+    Example usage for one query-image pair:
+
+    ```python
+    >>> from colpali_engine.interpretability.similarity_map_utils import get_similarity_maps_from_embeddings
+
+    >>> batch_images = processor.process_images([image]).to(device)
+    >>> batch_queries = processor.process_queries([query]).to(device)
+
+    >>> with torch.no_grad():
+            image_embeddings = model.forward(**batch_images)
+            query_embeddings = model.forward(**batch_queries)
+
+    >>> n_patches = processor.get_n_patches(
+            image_size=image.size,
+            patch_size=model.patch_size
+        )
+    >>> image_mask = processor.get_image_mask(batch_images)
+
+    >>> batched_similarity_maps = get_similarity_maps_from_embeddings(
+            image_embeddings=image_embeddings,
+            query_embeddings=query_embeddings,
+            n_patches=n_patches,
+            image_mask=image_mask,
+        )
+    >>> similarity_maps = batched_similarity_maps[0]  # (query_length, n_patches_x, n_patches_y)
+
+    >>> plots = plot_all_similarity_maps(
+            image=image,
+            query_tokens=query_tokens,
+            similarity_maps=similarity_maps,
+        )
+
+    >>> for fig, ax in plots:
+            fig.show()
+    ```
+    """
+
+    similarity_map = similarity_maps.sum(dim=0)
+    fig, ax = plot_similarity_map(
+        image=image,
+        similarity_map=similarity_map,
+        figsize=figsize,
+        show_colorbar=show_colorbar,
+    )
+
+    if add_title:
+        if not title:
+            max_sim_score = similarity_map.max().item()
+            ax.set_title(f"MaxSim score: {max_sim_score:.2f}", fontsize=14)
+        else:
+            ax.set_title(title, fontsize=14)
+    return fig, ax
