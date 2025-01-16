@@ -4,6 +4,50 @@ from math import ceil, sqrt
 import torch
 from torch import nn
 from transformers.models.qwen2_vl import Qwen2VLConfig, Qwen2VLForConditionalGeneration
+from colpali_engine.utils.torch_utils import find_min_max_indices
+
+
+class PatchMerger(nn.Module):
+    def __init__(self, hidden_size: int, dim: int, merge_size: int = 2) -> None:
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.merge_size = merge_size
+        self.ln_q = nn.LayerNorm(hidden_size, eps=1e-6)
+        self.mlp = nn.Sequential(
+            nn.Linear(hidden_size*merge_size, hidden_size),
+            nn.GELU(),
+            nn.Linear(hidden_size, dim),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.mlp(self.ln_q(x).view(x.size(0), -1, self.hidden_size*self.merge_size))
+        return x
+
+
+class AvgPoolingMerger(nn.Module):
+    def __init__(self, merge_size) -> None:
+        super().__init__()
+        kernel_size = int(sqrt(merge_size))
+        self.conv = nn.AvgPool2d(kernel_size=kernel_size, stride=kernel_size)
+        self.max_tokens = ceil(780//merge_size)
+
+    def forward(
+        self,
+        hidden_states,
+        attention_mask,
+        image_grid_thw,
+    ):
+        outputs = torch.zeros((hidden_states.size(0), self.max_tokens, hidden_states.size(-1)), device=hidden_states.device, dtype=hidden_states.dtype)
+        outputs_attention = torch.zeros((attention_mask.size(0), self.max_tokens), device=attention_mask.device, dtype=attention_mask.dtype)
+        
+        image_token_nums = (image_grid_thw[:,1]*image_grid_thw[:,2])//4
+        for i, (image_token_num, hidden_state) in enumerate(zip(image_token_nums, hidden_states)):
+            hidden_state = hidden_state[:image_token_num]
+            hidden_state_reshaped = hidden_state.view(image_grid_thw[i, 1]//2, image_grid_thw[i, 2]//2, hidden_state.size(-1)).permute(2, 0, 1)
+            hidden_state_reshaped = self.conv(hidden_state_reshaped).view(hidden_state.size(-1), -1).permute(1, 0)
+            outputs[i, :hidden_state_reshaped.size(0)] = hidden_state_reshaped
+            outputs_attention[i, :hidden_state_reshaped.size(0)] = 1
+        return outputs, outputs_attention
 
 
 class ColQwen2(Qwen2VLForConditionalGeneration):
@@ -13,9 +57,22 @@ class ColQwen2(Qwen2VLForConditionalGeneration):
 
     main_input_name: ClassVar[str] = "doc_input_ids"  # transformers-related
 
-    def __init__(self, config: Qwen2VLConfig):
+    def __init__(
+        self, 
+        config: Qwen2VLConfig,
+        pooling_strategy: Optional[str]=None,
+        pool_size: int=10,
+        dim: int=128,
+    ):
         super().__init__(config=config)
-        self.dim = 128
+        self.dim = dim
+        self.pool_size = pool_size
+        self.pooling_strategy = pooling_strategy
+        if self.pooling_strategy=="channelwise-pooling":
+            self.custom_image_proj = PatchMerger(self.model.config.hidden_size, self.dim, self.pool_size)
+        if self.pooling_strategy=="post_proj_2dpool":
+            self.custom_image_proj = AvgPoolingMerger(self.pool_size)
+        
         self.custom_text_proj = nn.Linear(self.model.config.hidden_size, self.dim)
         self.padding_side = "left"
         self.post_init()
@@ -83,9 +140,12 @@ class ColQwen2(Qwen2VLForConditionalGeneration):
             return_dict=return_dict,
         )
 
-        hidden_states = outputs[0]
-        return hidden_states
-
+        if output_attentions:
+            hidden_states, self_attns = outputs[0], outputs[-1]
+            return hidden_states, self_attns
+        else:
+            hidden_states = outputs[0]
+            return hidden_states
 
 
     def forward(self, *args, **kwargs) -> torch.Tensor:
@@ -108,37 +168,76 @@ class ColQwen2(Qwen2VLForConditionalGeneration):
             video_grid_thw=None,
             attention_mask=kwargs.get("attention_mask", None),
         )
-        last_hidden_states = self.inner_forward(*args,
-                                  **kwargs,
-                                  position_ids=position_ids,
-                                  use_cache=False,
-                                  output_hidden_states=True)  # (batch_size, sequence_length, hidden_size)
+        if kwargs.get("output_attentions", False):
+            last_hidden_states, self_attns = self.inner_forward(*args,
+                                    **kwargs,
+                                    position_ids=position_ids,
+                                    use_cache=False,
+                                    output_hidden_states=True)  # (batch_size, sequence_length, hidden_size)
+        else:
+            last_hidden_states = self.inner_forward(*args,
+                                    **kwargs,
+                                    position_ids=position_ids,
+                                    use_cache=False,
+                                    output_hidden_states=True)  # (batch_size, sequence_length, hidden_size)
 
-        if "pixel_values" in kwargs and self.pooling_strategy is not None:
-            pad_length = ceil(kwargs["attention_mask"].size(1)/self.pool_size)*self.pool_size-kwargs["attention_mask"].size(1)
-            attention_paddings = torch.zeros_like(kwargs["attention_mask"])[:, :pad_length]
-            kwargs["attention_mask"] = torch.cat([kwargs["attention_mask"], attention_paddings], dim=1)
-            kwargs["attention_mask"] = kwargs["attention_mask"].view(kwargs["attention_mask"].size(0), kwargs["attention_mask"].size(1)//self.pool_size, self.pool_size)
-            kwargs["attention_mask"] = torch.any(kwargs["attention_mask"], dim=2).long()
+        # We only consider image tokens.
+        if "pixel_values" in kwargs:
+            if self.pooling_strategy:
+                last_hidden_states = self.extract_image_features(last_hidden_states, kwargs)
+
+            if self.pooling_strategy is not None and self.pooling_strategy!="post_proj_2dpool":
+                # pad_length = ceil(kwargs["attention_mask"].size(1)/self.pool_size)*self.pool_size-kwargs["attention_mask"].size(1)
+                pad_length = 780 - kwargs["attention_mask"].size(1)
+                attention_paddings = torch.zeros_like(kwargs["attention_mask"])[:, :pad_length]
+                kwargs["attention_mask"] = torch.cat([kwargs["attention_mask"], attention_paddings], dim=1)
+                kwargs["attention_mask"] = kwargs["attention_mask"].view(kwargs["attention_mask"].size(0), kwargs["attention_mask"].size(1)//self.pool_size, self.pool_size)
+                kwargs["attention_mask"] = torch.any(kwargs["attention_mask"], dim=2).long()
+            
+            if self.pooling_strategy in ["pre_proj_flatten", "channelwise-pooling"]:
+                output_paddings = torch.zeros_like(last_hidden_states)[:, :pad_length]
+                last_hidden_states = torch.cat([last_hidden_states, output_paddings], dim=1)
+                if self.pooling_strategy=="pre_proj_flatten":
+                    last_hidden_states = last_hidden_states.view(last_hidden_states.size(0), last_hidden_states.size(1)//self.pool_size, self.pool_size, last_hidden_states.size(2))
+                    last_hidden_states = last_hidden_states.mean(dim=2)
         
-        if "pixel_values" in kwargs and self.pooling_strategy=="pre_proj_flatten":
-            output_paddings = torch.zeros_like(last_hidden_states)[:, :pad_length]
-            last_hidden_states = torch.cat([last_hidden_states, output_paddings], dim=1)
-            last_hidden_states = last_hidden_states.view(last_hidden_states.size(0), last_hidden_states.size(1)//self.pool_size, self.pool_size, last_hidden_states.size(2))
-            last_hidden_states = last_hidden_states.mean(dim=2)
-        
-        proj = self.custom_text_proj(last_hidden_states)  # (batch_size, sequence_length, dim)
-        if "pixel_values" in kwargs and self.pooling_strategy=="post_proj_flatten":
-            output_paddings = torch.zeros_like(proj)[:, :pad_length]
-            proj = torch.cat([proj, output_paddings], dim=1)
-            proj = proj.view(proj.size(0), proj.size(1)//self.pool_size, self.pool_size, proj.size(2))
-            proj = proj.mean(dim=2)
+        if "pixel_values" in kwargs and self.pooling_strategy=="channelwise-pooling":
+            proj = self.custom_image_proj(last_hidden_states)
+        else:
+            proj = self.custom_text_proj(last_hidden_states)  # (batch_size, sequence_length, dim)
+
+        if "pixel_values" in kwargs:
+            if self.pooling_strategy=="post_proj_flatten":
+                output_paddings = torch.zeros_like(proj)[:, :pad_length]
+                proj = torch.cat([proj, output_paddings], dim=1)
+                proj = proj.view(proj.size(0), proj.size(1)//self.pool_size, self.pool_size, proj.size(2))
+                proj = proj.mean(dim=2)
+            if self.pooling_strategy=="post_proj_2dpool":
+                proj, kwargs["attention_mask"] = self.custom_image_proj(
+                    proj,
+                    kwargs["attention_mask"],
+                    kwargs["image_grid_thw"]
+                )
+            # Copy from https://github.com/dvlab-research/VisionZip/blob/main/visionzip/clip_encoder.py
+            if self.pooling_strategy=="post_proj_cluster":
+                target_indices = torch.arange(0, proj.shape[1], self.pool_size, device=proj.device)
+                target_tokens = proj[:, target_indices, :]
+                tokens_to_merge = proj[:, ~torch.isin(torch.arange(proj.shape[1], device=proj.device), target_indices), :]
+                similarity = torch.bmm(tokens_to_merge, target_tokens.transpose(1, 2))
+                assign_one_hot = torch.zeros(tokens_to_merge.shape[0], tokens_to_merge.shape[1], len(target_indices), dtype=proj.dtype, device=proj.device)
+                assign_one_hot.scatter_(2, similarity.argmax(dim=2).unsqueeze(-1), 1)
+                counts = assign_one_hot.sum(dim=1).unsqueeze(-1)
+                proj = (torch.bmm(assign_one_hot.transpose(1, 2), tokens_to_merge)+target_tokens) / (counts+1)
         
         # L2 normalization
-        proj = proj / proj.norm(dim=-1, keepdim=True)  # (batch_size, sequence_length, dim)
+        proj = (proj+1e-10) / (proj.norm(dim=-1, keepdim=True)+1e-10)  # (batch_size, sequence_length, dim)
         proj = proj * kwargs["attention_mask"].unsqueeze(-1)  # (batch_size, sequence_length, dim)
         print(proj.size())
-        return proj
+
+        if kwargs.get("output_attentions", False):
+            return proj, self_attns
+        else:
+            return proj
 
     @property
     def patch_size(self) -> int:
@@ -147,25 +246,16 @@ class ColQwen2(Qwen2VLForConditionalGeneration):
     @property
     def spatial_merge_size(self) -> int:
         return self.visual.config.spatial_merge_size
-    
 
-    # def get_patch_ids(self, h_len, w_len):
-    #     self.pool_size = 9
-    #     pool_length = int(sqrt(self.pool_size))
-    #     w_len = int(w_len/self.spatial_merge_size)
-    #     h_len = int(h_len/self.spatial_merge_size)
+    def extract_image_features(self, last_hidden_states, kwargs):
+        min_max_indices = find_min_max_indices(kwargs["input_ids"], self.config.image_token_id)
+        max_length = max(min_max_indices[:, 1] - min_max_indices[:, 0])+1
 
-    #     g_w = ceil(w_len/pool_length)
-    #     g_h = ceil(h_len/pool_length)
+        image_features = torch.zeros((last_hidden_states.size(0), max_length, last_hidden_states.size(2)), device=last_hidden_states.device, dtype=last_hidden_states.dtype)
+        attention_mask = torch.zeros((kwargs["attention_mask"].size(0), max_length), device=kwargs["attention_mask"].device, dtype=kwargs["attention_mask"].dtype)
+        for i, (min_index, max_index) in enumerate(min_max_indices):
+            image_features[i, :(max_index-min_index+1)] = last_hidden_states[i, min_index:(max_index+1)]
+            attention_mask[i, :(max_index-min_index+1)] = 1
+        kwargs["attention_mask"] = attention_mask
 
-    #     patch_ids_list = list()
-    #     for i in range(g_w*g_h):
-    #         g_x, g_y = i%g_w, i//g_w
-    #         patch_ids = list()
-    #         for y in range(pool_length*g_y, min(pool_length*(g_y+1), h_len)):
-    #             for x in range(pool_length*g_x, min(pool_length*(g_x+1), w_len)):
-    #                 patch_ids.append(x+y*w_len)
-    #         patch_ids_list.append(
-    #             torch.tensor(patch_ids)
-    #         )
-    #     return nn.utils.rnn.pad_sequence(patch_ids_list, batch_first=True, padding_value=-1)
+        return image_features

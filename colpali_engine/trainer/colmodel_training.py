@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Callable, Dict, Optional, Tuple
 
 import torch
+import torch.nn as nn
 from datasets import concatenate_datasets
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from torch.utils.data import DataLoader
@@ -70,11 +71,18 @@ class ColModelTrainingConfig:
             print("Using textual model tokenization")
             self.tokenizer = AutoTokenizer.from_pretrained(self.model.name_or_path)
 
-        self.model.pooling_strategy = self.pooling_strategy
-        self.model.pool_size = self.pool_size
         if self.pretrained_peft_model_name_or_path is not None:
             self.model.load_adapter(self.pretrained_peft_model_name_or_path)
-
+            if "custom_text_proj.pt" in os.listdir(self.pretrained_peft_model_name_or_path):
+                proj_state_dict = torch.load(
+                    os.path.join(self.pretrained_peft_model_name_or_path, "custom_text_proj.pt")
+                )
+                try:
+                    self.model.custom_text_proj.base_layer.weight = nn.Parameter(proj_state_dict['base_model.model.custom_text_proj.base_layer.weight'])
+                    self.model.custom_text_proj.base_layer.bias = nn.Parameter(proj_state_dict['base_model.model.custom_text_proj.base_layer.bias'])
+                except:
+                    self.model.custom_text_proj.weight = nn.Parameter(proj_state_dict['base_model.model.custom_text_proj.weight'])
+                    self.model.custom_text_proj.bias = nn.Parameter(proj_state_dict['base_model.model.custom_text_proj.bias'])
             print(f"Loaded pretrained adapter from {self.pretrained_peft_model_name_or_path}")
 
         if self.peft_config is not None:
@@ -94,6 +102,17 @@ class ColModelTrainingConfig:
                 else:
                     print(f"Adapter already loaded from {self.pretrained_peft_model_name_or_path}. Not overwriting.")
 
+        if self.run_train and not self.proj_lora:
+            self.model.custom_text_proj.weight.requires_grad = True
+            self.model.custom_text_proj.bias.requires_grad = True
+            if hasattr(self.model, "custom_image_proj") and self.model.pooling_strategy == "channelwise-pooling":  
+                self.model.custom_image_proj.mlp[0].weight.requires_grad = True
+                self.model.custom_image_proj.mlp[0].bias.requires_grad = True
+                self.model.custom_image_proj.mlp[2].weight.requires_grad = True
+                self.model.custom_image_proj.mlp[2].bias.requires_grad = True
+            # if hasattr(self.model, "custom_image_proj") and self.model.pooling_strategy == "post_proj_2dpool":
+            #     self.model.custom_image_proj.proj.weight.requires_grad = True
+            #     self.model.custom_image_proj.proj.bias.requires_grad = True
     print_gpu_utilization()
 
 

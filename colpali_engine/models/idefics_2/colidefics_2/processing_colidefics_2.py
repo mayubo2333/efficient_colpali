@@ -23,7 +23,7 @@ class ColIdefics2Processor(BaseVisualRetrieverProcessor, Idefics2Processor):
         Process images for ColIdefics2.
         """
         texts_doc: List[str] = []
-        images = [image.convert("RGB") for image in images]
+        images = [[image.convert("RGB")] for image in images]
 
         for _ in images:
             messages_doc = [

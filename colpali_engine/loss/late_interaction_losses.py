@@ -1,3 +1,4 @@
+import math
 import torch
 import torch.nn.functional as F  # noqa: N812
 from torch.nn import CrossEntropyLoss
@@ -72,6 +73,48 @@ class ColbertPairwiseCELoss(torch.nn.Module):
         # torch.vstack((pos_scores, neg_scores)).T.softmax(1)[:, 0].log()*(-1)
         loss = F.softplus(neg_scores - pos_scores).mean()
 
+        return loss
+    
+
+class ColbertPairwiseCELoss_Matryoshka(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, query_embeddings, doc_embeddings):
+        """
+        query_embeddings: (batch_size, num_query_tokens, dim)
+        doc_embeddings: (batch_size, num_doc_tokens, dim)
+
+        Positive scores are the diagonal of the scores matrix.
+        """
+        assert(math.log2(query_embeddings.size(-1)).is_integer())
+
+        low_exp, high_exp = 5, int(math.log2(query_embeddings.size(-1)))
+        loss = 0.0
+        for exp in range(low_exp, high_exp+1):
+            query_embeddings_sub = F.normalize(query_embeddings[..., :2**exp], p=2, dim=-1)
+            doc_embeddings_sub = F.normalize(doc_embeddings[..., :2**exp], p=2, dim=-1)
+            # Compute the ColBERT scores
+            scores = (
+                torch.einsum("bnd,csd->bcns", query_embeddings_sub, doc_embeddings_sub).max(dim=3)[0].sum(dim=2)
+            )  # (batch_size, batch_size)
+            # Positive scores are the diagonal of the scores matrix.
+            pos_scores = scores.diagonal()  # (batch_size,)
+
+            # Negative score for a given query is the maximum of the scores against all all other pages.
+            # NOTE: We exclude the diagonal by setting it to a very low value: since we know the maximum score is 1,
+            # we can subtract 1 from the diagonal to exclude it from the maximum operation.
+            neg_scores = scores - torch.eye(scores.shape[0], device=scores.device) * 1e6  # (batch_size, batch_size)
+            neg_scores = neg_scores.max(dim=1)[0]  # (batch_size,)
+
+            # Compute the loss
+            # The loss is computed as the negative log of the softmax of the positive scores
+            # relative to the negative scores.
+            # This can be simplified to log-sum-exp of negative scores minus the positive score
+            # for numerical stability.
+            # torch.vstack((pos_scores, neg_scores)).T.softmax(1)[:, 0].log()*(-1)
+            loss += F.softplus(neg_scores - pos_scores).mean()
+        loss = loss/(high_exp-low_exp+1)
         return loss
 
 

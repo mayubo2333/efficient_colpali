@@ -1,6 +1,8 @@
+import os
+from typing import Optional
+
 import torch
 from transformers import Trainer
-
 
 class ContrastiveTrainer(Trainer):
     def __init__(self, loss_func, is_vision_model, *args, **kwargs):
@@ -36,3 +38,23 @@ class ContrastiveTrainer(Trainer):
 
             loss = self.loss_func(query_outputs, doc_outputs)
             return loss, None, None
+
+    def _save(self, output_dir: Optional[str] = None, state_dict=None):
+        # If we are executing this function, we are the process zero, so we don't check for that.
+        output_dir = output_dir if output_dir is not None else self.args.output_dir
+        os.makedirs(output_dir, exist_ok=True)
+        # logger.info(f"Saving model checkpoint to {output_dir}")
+        self.model.save_pretrained(
+            output_dir, state_dict=state_dict, safe_serialization=self.args.save_safetensors
+        )
+
+        proj_prefix = "custom_text_proj"
+        proj_state_dict = {k:v for k, v in self.model.state_dict().items() if proj_prefix in k}
+        if proj_state_dict:
+            torch.save(proj_state_dict, os.path.join(output_dir, "custom_text_proj.pt"))
+
+        if self.processing_class is not None:
+            self.processing_class.save_pretrained(output_dir)
+
+        # Good practice: save your training arguments together with the trained model
+        torch.save(self.args, os.path.join(output_dir, "training_args.bin"))
