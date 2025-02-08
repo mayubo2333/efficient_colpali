@@ -1,10 +1,14 @@
-from typing import Any, Dict, List, Union, cast
+import torch
+from math import ceil, sqrt
+from typing import Any, Dict, List, Union, cast, Optional
+from torch.nn.utils.rnn import pad_sequence
 
 from PIL.Image import Image
 
 from colpali_engine.models.idefics_2 import ColIdefics2Processor
 from colpali_engine.models.paligemma import ColPaliProcessor
 from colpali_engine.utils.processing_utils import BaseVisualRetrieverProcessor
+from colpali_engine.utils.torch_utils import find_min_max_indices
 
 
 class VisualRetrieverCollator:
@@ -16,10 +20,16 @@ class VisualRetrieverCollator:
         self,
         processor: BaseVisualRetrieverProcessor,
         max_length: int = 2048,
+        pooling_strategy: Optional[str] = None,
+        pool_size: Optional[int] = 1,
+        factor: int = 28,
     ):
         self.processor = processor
         self.image_token_id = None
         self.max_length = max_length
+        self.pooling_strategy = pooling_strategy
+        self.factor = factor
+        self.kernel_size = int(sqrt(pool_size))
 
         if isinstance(self.processor, ColPaliProcessor) or isinstance(self.processor, ColIdefics2Processor):
             self.image_token_id = self.processor.tokenizer.additional_special_tokens_ids[
@@ -31,6 +41,29 @@ class VisualRetrieverCollator:
                 print("Setting padding side to right")
                 self.processor.tokenizer.padding_side = "right"
 
+    def grid_index_to_patch_index(self, grid_index, new_height, new_width, grid_size=112, patch_size=28):
+        """
+        Convert grid index to patch index.
+        """
+        scale_factor = int(grid_size/patch_size)
+        width_factor = new_width/grid_size
+        i, j = grid_index // ceil(width_factor), grid_index % ceil(width_factor)
+
+        patch_index_list = []
+        first_token = width_factor*(scale_factor**2)*i + scale_factor*j
+        for k in range(scale_factor):
+            max_patch_index = min(
+                (new_height//patch_size) * (new_width//patch_size),
+                width_factor*scale_factor*(scale_factor*i+k+1)
+            )
+            for l in range(scale_factor):
+                patch_index = int(first_token + k*(width_factor*scale_factor) + l)
+                if patch_index < max_patch_index:
+                    patch_index_list.append(patch_index)
+        
+        if len(patch_index_list)<self.kernel_size**2:
+            patch_index_list += [-1]*(self.kernel_size**2-len(patch_index_list))
+        return patch_index_list
 
     def __call__(
         self,
@@ -97,4 +130,31 @@ class VisualRetrieverCollator:
             batch_neg_doc = {f"neg_doc_{k}": v for k, v in batch_neg_doc.items()}
             batch_all.update(batch_neg_doc)
 
+        image_range_list = find_min_max_indices(batch_all["doc_input_ids"], self.processor.image_token_id)
+        batch_all.update({"image_range_list": image_range_list})
+        
+        patch_indices_list = list()
+        for grid_thw in batch_all["doc_image_grid_thw"]:
+            token_num = torch.ceil(grid_thw[1]/(2*self.kernel_size)).long()*torch.ceil(grid_thw[2]/(2*self.kernel_size)).long()
+            patch_indices = list()
+            for i in range(token_num):
+                patch_index = self.grid_index_to_patch_index(
+                    grid_index=i,
+                    new_height=grid_thw[1]//2*self.factor,
+                    new_width=grid_thw[2]//2*self.factor,
+                    grid_size=self.factor*self.kernel_size,
+                    patch_size=self.factor
+                )
+                patch_indices.append(patch_index)
+            patch_indices = torch.tensor(patch_indices, dtype=torch.long)
+            patch_indices_list.append(patch_indices)
+        batch_all.update(
+            {"doc_patch_indices_list": pad_sequence(patch_indices_list, batch_first=True, padding_value=-1)}
+        )
+
+        # if "remove_index_list" in examples[0]:
+        #     remove_index_list_list = [torch.tensor(example["remove_index_list"], dtype=torch.long) for example in examples]
+        #     batch_all.update(
+        #         {"doc_remove_index_list": pad_sequence(remove_index_list_list, batch_first=True, padding_value=-1)}
+        #     )
         return batch_all

@@ -24,6 +24,7 @@ class BiPairwiseCELoss(torch.nn.Module):
     def __init__(self):
         super().__init__()
         self.ce_loss = CrossEntropyLoss()
+        self.temperature = 0.07
 
     def forward(self, query_embeddings, doc_embeddings):
         """
@@ -31,7 +32,7 @@ class BiPairwiseCELoss(torch.nn.Module):
         doc_embeddings: (batch_size, dim)
         """
 
-        scores = torch.einsum("bd,cd->bc", query_embeddings, doc_embeddings)
+        scores = torch.einsum("bd,cd->bc", query_embeddings, doc_embeddings)/self.temperature       # Add temperature coefficient
 
         pos_scores = scores.diagonal()
         neg_scores = scores - torch.eye(scores.shape[0], device=scores.device) * 1e6

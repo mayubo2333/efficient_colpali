@@ -72,7 +72,7 @@ class ColModelTrainingConfig:
             self.tokenizer = AutoTokenizer.from_pretrained(self.model.name_or_path)
 
         if self.pretrained_peft_model_name_or_path is not None:
-            self.model.load_adapter(self.pretrained_peft_model_name_or_path)
+            self.model.load_adapter(self.pretrained_peft_model_name_or_path, peft_config=self.peft_config)
             if "custom_text_proj.pt" in os.listdir(self.pretrained_peft_model_name_or_path):
                 proj_state_dict = torch.load(
                     os.path.join(self.pretrained_peft_model_name_or_path, "custom_text_proj.pt")
@@ -110,9 +110,6 @@ class ColModelTrainingConfig:
                 self.model.custom_image_proj.mlp[0].bias.requires_grad = True
                 self.model.custom_image_proj.mlp[2].weight.requires_grad = True
                 self.model.custom_image_proj.mlp[2].bias.requires_grad = True
-            # if hasattr(self.model, "custom_image_proj") and self.model.pooling_strategy == "post_proj_2dpool":
-            #     self.model.custom_image_proj.proj.weight.requires_grad = True
-            #     self.model.custom_image_proj.proj.bias.requires_grad = True
     print_gpu_utilization()
 
 
@@ -136,6 +133,8 @@ class ColModelTraining:
             self.collator = VisualRetrieverCollator(
                 processor=self.config.processor,
                 max_length=self.config.max_length,
+                pooling_strategy=self.config.model.pooling_strategy,
+                pool_size=self.config.model.pool_size,
             )
         self.current_git_hash = os.popen("git rev-parse HEAD").read().strip()
         self.retrieval_evaluator = CustomRetrievalEvaluator()
@@ -246,6 +245,8 @@ class ColModelTraining:
         self.collator = VisualRetrieverCollator(
             processor=self.config.processor,
             max_length=self.config.max_length,
+            pooling_strategy=self.config.model.pooling_strategy,
+            pool_size=self.config.model.pool_size,
         )
         if self.config.eval_dataset_loader is not None:
             for test_name, test_dataset_loading_func in self.config.eval_dataset_loader.items():

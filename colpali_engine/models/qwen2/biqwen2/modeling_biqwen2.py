@@ -11,10 +11,17 @@ class BiQwen2(Qwen2VLForConditionalGeneration):
 
     main_input_name: ClassVar[str] = "doc_input_ids"  # transformers-related
 
-    def __init__(self, config: Qwen2VLConfig):
+    def __init__(
+            self,
+            config: Qwen2VLConfig,
+            pooling_strategy: Optional[str]=None,
+            pool_size: int=1,
+        ):
         super().__init__(config=config)
         self.padding_side = "left"
         self.post_init()
+        self.pooling_strategy = pooling_strategy
+        self.pool_size = pool_size
 
 
     def inner_forward(
@@ -73,6 +80,8 @@ class BiQwen2(Qwen2VLForConditionalGeneration):
     def forward(self, *args, **kwargs) -> torch.Tensor:
         # Delete output_hidden_states from kwargs
         kwargs.pop("output_hidden_states", None)
+        kwargs.pop("patch_indices_list", None)
+        kwargs.pop("remove_index_list", None)
 
 
         # The following code is a hack to make sure the scatter in DDP is done correctly when training on multiple GPUs
