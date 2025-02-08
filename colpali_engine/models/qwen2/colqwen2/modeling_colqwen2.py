@@ -8,67 +8,11 @@ from transformers import Qwen2_5_VLForConditionalGeneration, Qwen2_5_VLConfig
 from colpali_engine.utils.torch_utils import find_min_max_indices, pool_embeddings
 
 
-class PatchMerger(nn.Module):
-    def __init__(self, hidden_size: int, dim: int, merge_size: int = 2) -> None:
-        super().__init__()
-        self.hidden_size = hidden_size
-        self.merge_size = merge_size
-        self.ln_q = nn.LayerNorm(hidden_size, eps=1e-6)
-        self.mlp = nn.Sequential(
-            nn.Linear(hidden_size*merge_size, hidden_size),
-            nn.GELU(),
-            nn.Linear(hidden_size, dim),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.mlp(self.ln_q(x).view(x.size(0), -1, self.hidden_size*self.merge_size))
-        return x
-
-
-class WeightHead(nn.Module):
-    def __init__(self, hidden_size: int) -> None:
-        super().__init__()
-        self.mlp = nn.Sequential(
-            nn.Linear(hidden_size, 1),
-            nn.Sigmoid(),
-        )
-
-    
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.mlp(x)
-
-
 class AvgPoolingMerger(nn.Module):
     def __init__(self, merge_size) -> None:
         super().__init__()
         self.factor = 28
         self.kernel_size = int(sqrt(merge_size))
-
-    
-    # def grid_index_to_patch_index(self, grid_index, new_height, new_width, grid_size=112, patch_size=28):
-    #     """
-    #     Convert grid index to patch index.
-    #     """
-    #     scale_factor = int(grid_size/patch_size)
-    #     width_factor = new_width/grid_size
-    #     i, j = grid_index // ceil(width_factor), grid_index % ceil(width_factor)
-
-    #     patch_index_list = []
-    #     first_token = width_factor*(scale_factor**2)*i + scale_factor*j
-    #     for k in range(scale_factor):
-    #         max_patch_index = min(
-    #             (new_height//patch_size) * (new_width//patch_size),
-    #             width_factor*scale_factor*(scale_factor*i+k+1)
-    #         )
-    #         for l in range(scale_factor):
-    #             patch_index = int(first_token + k*(width_factor*scale_factor) + l)
-    #             if patch_index < max_patch_index:
-    #                 patch_index_list.append(patch_index)
-        
-    #     if len(patch_index_list)<self.kernel_size**2:
-    #         patch_index_list += [-1]*(self.kernel_size**2-len(patch_index_list))
-    #     return patch_index_list
-
 
     def forward(
         self,
@@ -126,13 +70,10 @@ class ColQwen2(Qwen2VLForConditionalGeneration):
         self.dim = dim
         self.pool_size = pool_size
         self.pooling_strategy = pooling_strategy
-        if self.pooling_strategy=="channelwise-pooling":
-            self.custom_image_proj = PatchMerger(self.model.config.hidden_size, self.dim, self.pool_size)
         if self.pooling_strategy in ["post_proj_2dpool", "pre_llm_2dpool"]:
             self.custom_image_proj = AvgPoolingMerger(self.pool_size)
         
         self.custom_text_proj = nn.Linear(self.model.config.hidden_size, self.dim)
-        self.weight_head = WeightHead(self.model.config.hidden_size)
         self.padding_side = "left"
         self.post_init()
 
@@ -295,29 +236,20 @@ class ColQwen2(Qwen2VLForConditionalGeneration):
                 kwargs["attention_mask"] = torch.any(kwargs["attention_mask"], dim=2).long()
                 kwargs["attention_mask"] = torch.cat([kwargs["attention_mask"], one_paddings], dim=1)
             
-            if self.pooling_strategy in ["pre_proj_flatten", "channelwise-pooling"]:
+            if self.pooling_strategy in ["pre_proj_flatten"]:
                 output_paddings = torch.zeros_like(last_hidden_states)[:, :pad_length]
                 last_hidden_states = torch.cat([last_hidden_states, output_paddings], dim=1)
                 if self.pooling_strategy=="pre_proj_flatten":
                     last_hidden_states = last_hidden_states.view(last_hidden_states.size(0), last_hidden_states.size(1)//self.pool_size, self.pool_size, last_hidden_states.size(2))
                     last_hidden_states = last_hidden_states.mean(dim=2)
         
-        if "pixel_values" in kwargs and self.pooling_strategy=="channelwise-pooling":
-            proj = self.custom_image_proj(last_hidden_states)
-        else:
-            proj = self.custom_text_proj(last_hidden_states)  # (batch_size, sequence_length, dim)
+        proj = self.custom_text_proj(last_hidden_states)  # (batch_size, sequence_length, dim)
 
         if "pixel_values" in kwargs:
             if self.pooling_strategy=="post_proj_selected":
                 from torch.nn.utils.rnn import pad_sequence
-                weights = self.weight_head(last_hidden_states)  # (batch_size, sequence_length, 1)
-
                 indices_list = list()
-                for weight, patch_range in zip(weights, find_min_max_indices(kwargs["input_ids"], self.config.image_token_id)):
-                    # indices = torch.topk(
-                    #     weight[patch_range[0]:patch_range[1]+1].view(-1), 
-                    #     k=min(ceil((vision_end_token_index+1)/self.pool_size), patch_range[1]+1-patch_range[0])
-                    # ).indices + patch_range[0]
+                for patch_range in find_min_max_indices(kwargs["input_ids"], self.config.image_token_id):
                     k = min(ceil((vision_end_token_index+1)/self.pool_size), patch_range[1]+1-patch_range[0])
                     indices = torch.randperm(patch_range[1]-patch_range[0]+1, device=weight.device)[:k] + patch_range[0]
                     indices_list.append(indices)
@@ -335,8 +267,7 @@ class ColQwen2(Qwen2VLForConditionalGeneration):
                 proj = torch.cat([output_paddings.clone(), proj[:, :vision_end_token_index+1]], dim=1)
                 proj = proj.view(proj.size(0), proj.size(1)//self.pool_size, self.pool_size, proj.size(2))
 
-                proj = (proj*weights.unsqueeze(-1)).sum(dim=2)/weights.sum(dim=2).unsqueeze(-1)     # weighted mean
-                # proj = proj.view(proj.size(0), proj.size(1)//self.pool_size, self.pool_size, proj.size(2)).mean(dim=2)
+                proj = proj.view(proj.size(0), proj.size(1)//self.pool_size, self.pool_size, proj.size(2)).mean(dim=2)
                 proj = torch.cat([proj, proj_tail], dim=1)
 
             if self.pooling_strategy=="post_proj_2dpool":
