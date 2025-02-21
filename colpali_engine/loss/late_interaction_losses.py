@@ -39,12 +39,13 @@ class ColbertLoss(torch.nn.Module):
     
 
 class ColbertPairwiseCELoss_prune(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, prune_ratio):
         super().__init__()
         self.ce_loss = CrossEntropyLoss()
+        self.prune_ratio = prune_ratio
 
 
-    def prune(self, query_embeddings, doc_embeddings, prune_ratio):
+    def prune(self, query_embeddings, doc_embeddings):
         # Compute the ColBERT scores
         scores_prune = torch.einsum("bnd,csd->bcns", doc_embeddings, query_embeddings)
         self_mask = 1 - torch.eye(scores_prune.size(0), device=scores_prune.device).long()
@@ -55,20 +56,20 @@ class ColbertPairwiseCELoss_prune(torch.nn.Module):
         for prune_mask, score_prune in zip(prune_masks, scores_prune):
             zero_num = score_prune.eq(0).sum().item()
             index_rank = score_prune.sort().indices[zero_num:]
-            remove_index = index_rank[:int(len(index_rank)*prune_ratio)]
+            remove_index = index_rank[:int(len(index_rank)*self.prune_ratio)]
             prune_mask[remove_index] = 0
         doc_embeddings = doc_embeddings * prune_masks.unsqueeze(-1)
         return doc_embeddings
 
 
-    def forward(self, query_embeddings, doc_embeddings, prune_ratio=0.9):
+    def forward(self, query_embeddings, doc_embeddings):
         """
         query_embeddings: (batch_size, num_query_tokens, dim)
         doc_embeddings: (batch_size, num_doc_tokens, dim)
 
         Positive scores are the diagonal of the scores matrix.
         """
-        doc_embeddings = self.prune(query_embeddings, doc_embeddings, prune_ratio)
+        doc_embeddings = self.prune(query_embeddings, doc_embeddings)
         # Compute the ColBERT scores
         scores = (
             torch.einsum("bnd,csd->bcns", query_embeddings, doc_embeddings).max(dim=3)[0].sum(dim=2)
