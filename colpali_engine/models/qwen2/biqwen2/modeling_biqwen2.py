@@ -39,6 +39,8 @@ class BiQwen2(Qwen2VLForConditionalGeneration):
             pixel_values_videos: Optional[torch.FloatTensor] = None,
             image_grid_thw: Optional[torch.LongTensor] = None,
             video_grid_thw: Optional[torch.LongTensor] = None,
+            patch_ranges: Optional[torch.Tensor]=None,
+            patch_indices_list: Optional[torch.Tensor]=None,
     ) -> torch.Tensor:
 
         if inputs_embeds is None:
@@ -108,4 +110,5 @@ class BiQwen2(Qwen2VLForConditionalGeneration):
         # take the last hidden state
         proj = last_hidden_states[:, -1, :]
         proj = proj / proj.norm(dim=-1, keepdim=True)
+        print(proj.size())
         return proj

@@ -12,7 +12,12 @@ class BiPali(PaliGemmaPreTrainedModel):
     Representations are average pooled to obtain a single vector representation.
     """
 
-    def __init__(self, config: PaliGemmaConfig):
+    def __init__(
+        self, 
+        config: PaliGemmaConfig,
+        pooling_strategy: Optional[str]=None,
+        pool_size: int=1,
+    ):
         super(BiPali, self).__init__(config=config)
         model: PaliGemmaForConditionalGeneration = PaliGemmaForConditionalGeneration(config)
         if model.language_model._tied_weights_keys is not None:
@@ -20,6 +25,8 @@ class BiPali(PaliGemmaPreTrainedModel):
         self.model: PaliGemmaForConditionalGeneration = model
         self.main_input_name = "doc_input_ids"
         self.post_init()
+        self.pooling_strategy = pooling_strategy
+        self.pool_size = pool_size
 
     def get_input_embeddings(self):
         return self.model.language_model.get_input_embeddings()
@@ -53,6 +60,9 @@ class BiPali(PaliGemmaPreTrainedModel):
     def forward(self, *args, **kwargs):
         # delete output_hidden_states from kwargs
         kwargs.pop("output_hidden_states", None)
+        kwargs.pop("patch_ranges", None)
+        kwargs.pop("patch_indices_list", None)
+
         if "pixel_values" in kwargs:
             kwargs["pixel_values"] = kwargs["pixel_values"].to(dtype=self.dtype)
 
