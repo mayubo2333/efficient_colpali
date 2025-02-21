@@ -1,7 +1,8 @@
 import os
 from typing import List, Tuple, cast
+from copy import deepcopy
 
-from datasets import Dataset, DatasetDict, concatenate_datasets, load_dataset
+from datasets import Dataset, DatasetDict, concatenate_datasets, load_dataset, load_from_disk
 
 USE_LOCAL_DATASET = os.environ.get("USE_LOCAL_DATASET", "1") == "1"
 
@@ -209,6 +210,39 @@ class TestSetFactory:
         return dataset
 
 
+class TestSetFactory_VisRAG:    
+    def __init__(self, dataset_path):
+        self.dataset_path = dataset_path
+
+    def __call__(self, *args, **kwargs):
+        queries = load_dataset(self.dataset_path, "queries", split="train")
+        qrels = load_dataset(self.dataset_path, "qrels", split="train")
+        corpus = load_dataset(self.dataset_path, "corpus", split="train")
+
+        query_corpus_dict = {qrel["query-id"]: qrel["corpus-id"] for qrel in qrels}
+        corpus_id_dict = {c['corpus-id']:c['image'] for c in corpus}
+        corpus_list = [deepcopy(corpus_id_dict[query_corpus_dict[query_id]]) for query_id in queries['query-id']]
+        corpus_id_list = [query_corpus_dict[query_id] for query_id in queries['query-id']]
+
+        dataset = Dataset.from_dict({
+            "image": corpus_list,
+            "image_filename": corpus_id_list,
+            "query": queries["query"],
+        })
+        return dataset
+
+
+class TestSetFactory_MMLongBenchDoc:    
+    def __init__(self, dataset_path):
+        self.dataset_path = dataset_path
+
+    def __call__(self, *args, **kwargs):
+        dataset = Dataset.load_from_disk(self.dataset_path)
+        return dataset
+
+
 if __name__ == "__main__":
-    ds = TestSetFactory("vidore/tabfquad_test_subsampled")()
+    # ds = TestSetFactory("vidore/tabfquad_test_subsampled")()
+    # ds = TestSetFactory_VisRAG("/mnt/petrelfs/mayubo/colpali/data_dir/VisRAG-Ret-Test-SlideVQA")()
+    ds = TestSetFactory_MMLongBenchDoc("/mnt/petrelfs/mayubo/colpali/data_dir/mmlongbench-doc")()
     print(ds)
