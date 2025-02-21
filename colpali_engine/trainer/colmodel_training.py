@@ -160,7 +160,7 @@ class ColModelTraining:
         result = trainer.train(resume_from_checkpoint=self.config.tr_args.resume_from_checkpoint)
         print_summary(result)
 
-    def eval_dataset(self, test_dataset):
+    def eval_dataset(self, test_dataset, test_name="docvqa"):
         self.model.eval()
 
         idx_with_query = [idx for idx, sample in enumerate(test_dataset["query"]) if sample is not None]
@@ -187,7 +187,7 @@ class ColModelTraining:
         relevant_docs = {}
         docidx_2_docid = {}
         qsidx_2_query = []
-        for idx, sample in enumerate(test_dataset):
+        for idx, sample in enumerate(tqdm(test_dataset)):
             doc_id = sample["image_filename"] if "image_filename" in sample else str(hash(sample["doc"]))
             # query_id = sample["query_id"] if "query_id" in sample else str(hash(sample["query"]))
             if sample["query"] is not None:
@@ -224,6 +224,12 @@ class ColModelTraining:
             results[qsidx_2_query[idx]] = {
                 docidx_2_docid[str(docidx)]: float(score) for docidx, score in enumerate(scores_per_query)
             }
+        if test_name=="mmlongbench-doc":
+            metrics = self.retrieval_evaluator.compute_mteb_metrics(relevant_docs, results)
+            print("MTEB metrics (before):", metrics)
+            for query_id, result in results.items():
+                doc_id = test_dataset[int(query_id)]["doc_id"]
+                results[query_id] = {page_id: score for page_id, score in result.items() if doc_id in page_id}
 
         # evaluate
         metrics = self.retrieval_evaluator.compute_mteb_metrics(relevant_docs, results)
@@ -233,13 +239,13 @@ class ColModelTraining:
 
     def eval(self) -> None:
         all_metrics = {}
-        try:
-            print("Evaluating on validation set")
-            metrics = self.eval_dataset(self.dataset["test"])
-            print(f"Metrics for validation set: {metrics}")
-            all_metrics["validation_set"] = metrics
-        except Exception as e:
-            print(f"Error evaluating validation set: {e}")
+        # try:
+        #     print("Evaluating on validation set")
+        #     metrics = self.eval_dataset(self.dataset["test"])
+        #     print(f"Metrics for validation set: {metrics}")
+        #     all_metrics["validation_set"] = metrics
+        # except Exception as e:
+        #     print(f"Error evaluating validation set: {e}")
 
         # switching to normal collator
         self.collator = VisualRetrieverCollator(
@@ -248,11 +254,14 @@ class ColModelTraining:
             pooling_strategy=self.config.model.pooling_strategy,
             pool_size=self.config.model.pool_size,
         )
+        
+        if not os.path.exists(self.config.output_dir):
+            os.makedirs(self.config.output_dir)
         if self.config.eval_dataset_loader is not None:
             for test_name, test_dataset_loading_func in self.config.eval_dataset_loader.items():
                 print(f"Evaluating {test_name}")
                 test_ds = test_dataset_loading_func()
-                metrics = self.eval_dataset(test_ds)
+                metrics = self.eval_dataset(test_ds, test_name)
                 all_metrics[test_name] = metrics
                 print(f"Metrics for {test_name}: {metrics}")
 
