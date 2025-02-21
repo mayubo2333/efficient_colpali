@@ -130,31 +130,27 @@ class VisualRetrieverCollator:
             batch_neg_doc = {f"neg_doc_{k}": v for k, v in batch_neg_doc.items()}
             batch_all.update(batch_neg_doc)
 
-        image_range_list = find_min_max_indices(batch_all["doc_input_ids"], self.processor.image_token_id)
-        batch_all.update({"image_range_list": image_range_list})
+        patch_ranges_list = find_min_max_indices(batch_all["doc_input_ids"], self.processor.image_token_id)
+        batch_all.update({"doc_patch_ranges": patch_ranges_list})
         
-        patch_indices_list = list()
-        for grid_thw in batch_all["doc_image_grid_thw"]:
-            token_num = torch.ceil(grid_thw[1]/(2*self.kernel_size)).long()*torch.ceil(grid_thw[2]/(2*self.kernel_size)).long()
-            patch_indices = list()
-            for i in range(token_num):
-                patch_index = self.grid_index_to_patch_index(
-                    grid_index=i,
-                    new_height=grid_thw[1]//2*self.factor,
-                    new_width=grid_thw[2]//2*self.factor,
-                    grid_size=self.factor*self.kernel_size,
-                    patch_size=self.factor
-                )
-                patch_indices.append(patch_index)
-            patch_indices = torch.tensor(patch_indices, dtype=torch.long)
-            patch_indices_list.append(patch_indices)
-        batch_all.update(
-            {"doc_patch_indices_list": pad_sequence(patch_indices_list, batch_first=True, padding_value=-1)}
-        )
+        if "doc_image_grid_thw" in batch_all:
+            patch_indices_list = list()
+            for grid_thw in batch_all["doc_image_grid_thw"]:
+                token_num = torch.ceil(grid_thw[1]/(2*self.kernel_size)).long()*torch.ceil(grid_thw[2]/(2*self.kernel_size)).long()
+                patch_indices = list()
+                for i in range(token_num):
+                    patch_index = self.grid_index_to_patch_index(
+                        grid_index=i,
+                        new_height=grid_thw[1]//2*self.factor,
+                        new_width=grid_thw[2]//2*self.factor,
+                        grid_size=self.factor*self.kernel_size,
+                        patch_size=self.factor
+                    )
+                    patch_indices.append(patch_index)
+                patch_indices = torch.tensor(patch_indices, dtype=torch.long)
+                patch_indices_list.append(patch_indices)
+            batch_all.update(
+                {"doc_patch_indices_list": pad_sequence(patch_indices_list, batch_first=True, padding_value=-1)}
+            )
 
-        # if "remove_index_list" in examples[0]:
-        #     remove_index_list_list = [torch.tensor(example["remove_index_list"], dtype=torch.long) for example in examples]
-        #     batch_all.update(
-        #         {"doc_remove_index_list": pad_sequence(remove_index_list_list, batch_first=True, padding_value=-1)}
-        #     )
         return batch_all
