@@ -1,19 +1,20 @@
 config:
   (): colpali_engine.trainer.colmodel_training.ColModelTrainingConfig
-  output_dir: !path ../../../models/right_pad/train_bipali_pairwise_256_pt
+  output_dir: !path ../../../models_new/colqwen2_pre_llm_2dpool_factor9
+
   processor:
     (): colpali_engine.utils.transformers_wrappers.AllPurposeWrapper
-    class_to_instanciate: !ext colpali_engine.models.BiPaliProcessor
-    pretrained_model_name_or_path: "./models/colpaligemma-3b-pt-448-base"
-    max_length: 50
+    class_to_instanciate: !ext colpali_engine.models.ColQwen2Processor
+    pretrained_model_name_or_path:  "/mnt/hwfile/mllm/mayubo/Qwen2-VL-2B-Instruct" # "./models/paligemma-3b-mix-448"
   model:
     (): colpali_engine.utils.transformers_wrappers.AllPurposeWrapper
-    class_to_instanciate: !ext colpali_engine.models.BiPali
-    pretrained_model_name_or_path: "./models/colpaligemma-3b-pt-448-base"
+    class_to_instanciate: !ext colpali_engine.models.ColQwen2
+    pretrained_model_name_or_path: "/mnt/hwfile/mllm/mayubo/Qwen2-VL-2B-Instruct"
     torch_dtype:  !ext torch.bfloat16
+    use_cache: false
     attn_implementation: "flash_attention_2"
-    # use_cache: false
-#    device_map: "auto"
+    pooling_strategy: pre_llm_2dpool
+    pool_size: 9
 #    quantization_config:
 #      (): transformers.BitsAndBytesConfig
 #      load_in_4bit: true
@@ -23,34 +24,35 @@ config:
 
   dataset_loading_func: !ext colpali_engine.utils.dataset_transformation.load_train_set
   eval_dataset_loader: !import ../data/test_data.yaml
+  proj_lora: false
 
-  max_length: 50
   run_eval: true
-  
   loss_func:
-    (): colpali_engine.loss.bi_encoder_losses.BiPairwiseCELoss
+    (): colpali_engine.loss.late_interaction_losses.ColbertPairwiseCELoss
   tr_args:
     (): transformers.training_args.TrainingArguments
     output_dir: null
     overwrite_output_dir: true
-    num_train_epochs: 3
-    per_device_train_batch_size: 64
+    num_train_epochs: 5
+    per_device_train_batch_size: 32
     gradient_checkpointing: true
     gradient_checkpointing_kwargs: { "use_reentrant": false }
-    # 6 x 8 gpus = 48 batch size
-    # gradient_accumulation_steps: 4
-    per_device_eval_batch_size: 64
+    per_device_eval_batch_size: 8
     eval_strategy: "steps"
     dataloader_num_workers: 8
-    # bf16: true
     save_steps: 500
-    logging_steps: 10
+    logging_steps: 1
     eval_steps: 100
     warmup_steps: 100
     learning_rate: 5e-4
     save_total_limit: 1
-    resume_from_checkpoint: false
+    # resume_from_checkpoint: true
+    # optim: "paged_adamw_8bit"
+    # wandb logging
+    # wandb_project: "colqwen2"
+    # run_name: "colqwen2-ba32-nolora"
     report_to: "wandb"
+
   peft_config:
     (): peft.LoraConfig
     r: 32
@@ -59,6 +61,4 @@ config:
     init_lora_weights: "gaussian"
     bias: "none"
     task_type: "FEATURE_EXTRACTION"
-    target_modules: '(.*(language_model).*(down_proj|gate_proj|up_proj|k_proj|q_proj|v_proj|o_proj).*$)'
-    # target_modules: '(.*(language_model).*(down_proj|gate_proj|up_proj|k_proj|q_proj|v_proj|o_proj).*$'
-
+    target_modules: '.*(model).*(down_proj|gate_proj|up_proj|k_proj|q_proj|v_proj|o_proj).*$'
